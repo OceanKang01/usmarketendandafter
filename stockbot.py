@@ -238,7 +238,7 @@ def handle_updates(state: dict) -> bool:
                 tg_send(chat_id, "No matches.")
             continue
             
-         if cmd == "/test":
+        if cmd == "/test":
             # 즉시 리포트 1회 발송 트리거
             state["force_report"] = True
             changed = True
