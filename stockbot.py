@@ -7,6 +7,12 @@ from zoneinfo import ZoneInfo
 import requests
 import yfinance as yf
 
+KR_NAME = {
+    "MU": "마이크론",
+    "NVDA": "엔비디아",
+}
+
+
 KST = ZoneInfo("Asia/Seoul")
 ET = ZoneInfo("America/New_York")
 
