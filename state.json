@@ -1,0 +1,7 @@
+{
+  "tickers": ["MU", "NVDA"],
+  "chat_id": null,
+  "allowed_user_id": null,
+  "last_update_id": 0,
+  "last_sent_kst_date": null
+}
