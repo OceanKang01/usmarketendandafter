@@ -7,10 +7,7 @@ from zoneinfo import ZoneInfo
 import requests
 import yfinance as yf
 
-KR_NAME = {
-    "MU": "마이크론",
-    "NVDA": "엔비디아",
-}
+
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -73,25 +70,29 @@ def parse_cmd(text: str):
       /start
       /list
       /add MU
-      /add MU,NVDA,TSLA
       /del NVDA
-      /del NVDA,TSLA
+      /name MU 마이크론
+      /unname MU
+      /names
+    반환:
+      (cmd, args_str, tickers_list)
     """
     text = (text or "").strip()
     if not text.startswith("/"):
-        return None, None
+        return None, "", []
 
     parts = text.split(maxsplit=1)
     cmd = parts[0].lower()
-    arg = parts[1] if len(parts) > 1 else ""
+    args = parts[1].strip() if len(parts) > 1 else ""
 
-    # 콤마/공백 혼합 입력 처리
+    # add/del용 ticker list (콤마/공백 혼합 지원)
     tickers = []
-    if arg:
-        raw = re.split(r"[,\s]+", arg.strip())
+    if args:
+        raw = re.split(r"[,\s]+", args)
         tickers = [normalize_ticker(x) for x in raw if normalize_ticker(x)]
 
-    return cmd, tickers
+    return cmd, args, tickers
+
 
 
 def handle_updates(state: dict) -> bool:
@@ -136,7 +137,7 @@ def handle_updates(state: dict) -> bool:
             state["chat_id"] = chat_id
             changed = True
 
-        cmd, tickers = parse_cmd(text)
+        cmd, args, tickers = parse_cmd(text)
 
         if cmd in ("/start",):
             tg_send(chat_id, "OK. /list, /add TICKER, /del TICKER 를 사용할 수 있어요.")
@@ -169,6 +170,76 @@ def handle_updates(state: dict) -> bool:
             tg_send(chat_id, "Updated: " + (", ".join(state["tickers"]) if state["tickers"] else "(empty)"))
             continue
 
+        if cmd == "/names":
+            names = state.get("names", {})
+            if not names:
+                tg_send(chat_id, "Names: (empty)")
+            else:
+                # 보기 좋게 정렬 출력
+                items = [f"{k}={v}" for k, v in sorted(names.items())]
+                tg_send(chat_id, "Names: " + ", ".join(items))
+            continue
+
+        if cmd == "/name":
+            # 형식: /name MU 마이크론
+            # args에서 첫 토큰이 ticker, 나머지 전체가 name
+            if not args:
+                tg_send(chat_id, "Usage: /name TICKER 한국명 (예: /name MU 마이크론)")
+                continue
+
+            parts2 = args.split(maxsplit=1)
+            if len(parts2) < 2:
+                tg_send(chat_id, "Usage: /name TICKER 한국명 (예: /name MU 마이크론)")
+                continue
+
+            t = normalize_ticker(parts2[0])
+            name = parts2[1].strip()
+
+            if not t or not name:
+                tg_send(chat_id, "Usage: /name TICKER 한국명 (예: /name MU 마이크론)")
+                continue
+
+            names = state.get("names")
+            if not isinstance(names, dict):
+                names = {}
+                state["names"] = names
+                changed = True
+
+            # 저장
+            prev = names.get(t)
+            if prev != name:
+                names[t] = name
+                changed = True
+
+            tg_send(chat_id, f"OK: {t} -> {name}")
+            continue
+
+        if cmd == "/unname":
+            # 형식: /unname MU (여러개도 허용: /unname MU NVDA)
+            if not tickers:
+                tg_send(chat_id, "Usage: /unname TICKER (예: /unname MU)")
+                continue
+
+            names = state.get("names")
+            if not isinstance(names, dict) or not names:
+                tg_send(chat_id, "Names: (empty)")
+                continue
+
+            removed = []
+            for t in tickers:
+                if t in names:
+                    del names[t]
+                    removed.append(t)
+                    changed = True
+
+            if removed:
+                tg_send(chat_id, "Removed: " + ", ".join(removed))
+            else:
+                tg_send(chat_id, "No matches.")
+            continue
+
+    
+    
     return changed
 
 
@@ -192,18 +263,20 @@ def yahoo_quote(symbols: list[str]) -> dict[str, dict]:
     return out
 
 
-def get_regular_close_yfinance(symbol: str):
+def get_close_and_prev_close_yfinance(symbol: str):
     """
-    정규장 종가: 최근 거래일 일봉 Close
+    당일 종가 + 전일 종가 (변화율 계산용)
     """
     t = yf.Ticker(symbol)
-    df = t.history(period="10d", interval="1d", auto_adjust=False)
-    if df is None or df.empty:
-        raise RuntimeError("empty daily")
-    last_idx = df.index[-1]
+    df = t.history(period="15d", interval="1d", auto_adjust=False)
+    if df is None or df.empty or len(df) < 2:
+        raise RuntimeError("not enough daily data")
+
     close = float(df["Close"].iloc[-1])
-    day = last_idx.date().isoformat()
-    return day, close
+    prev_close = float(df["Close"].iloc[-2])
+    day = df.index[-1].date().isoformat()
+    return day, close, prev_close
+
 
 
 def get_extended_last_yfinance(symbol: str):
@@ -225,15 +298,14 @@ def get_extended_last_yfinance(symbol: str):
     return ts_et, px
 
 
-def build_report(tickers: list[str]) -> str:
-    """
-    각 ticker에 대해:
-      - regular close (yfinance 우선, 실패 시 quote의 regularMarketPreviousClose)
-      - extended last (yfinance 우선, 실패 시 quote의 postMarketPrice 우선)
-    """
-    tickers = [normalize_ticker(t) for t in tickers if normalize_ticker(t)]
+def build_report(state: dict) -> str:
+    tickers = [normalize_ticker(t) for t in state.get("tickers", []) if normalize_ticker(t)]
     if not tickers:
         return "No tickers."
+
+    names_map = state.get("names", {})
+    if not isinstance(names_map, dict):
+        names_map = {}
 
     # 폴백 데이터(한 번에)
     quote_map = {}
@@ -242,71 +314,60 @@ def build_report(tickers: list[str]) -> str:
     except Exception:
         quote_map = {}
 
-    lines = []
-    now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
-    lines.append(f"[US Close + After-hours] {now_kst}")
-    lines.append("")
+    now_kst = datetime.now(KST)
+    wk_kr = ["월", "화", "수", "목", "금", "토", "일"][now_kst.weekday()]
+    header = f"[{now_kst.month}월{now_kst.day}일 {wk_kr}요일 미국 주식 마감]"
+    lines = [header]
 
     for sym in tickers:
-        # 1) regular close
-        trading_day = None
-        close = None
-        close_src = None
+        name = names_map.get(sym, sym)
+        # 이하 로직은 기존 “마감/애프터 변화율” 계산 그대로 두되,
+        # 출력에서 name만 사용하면 됩니다.
+        close = prev_close = None
         try:
-            trading_day, close = get_regular_close_yfinance(sym)
-            close_src = "yfinance(daily)"
+            _, close, prev_close = get_close_and_prev_close_yfinance(sym)
         except Exception:
             q = quote_map.get(sym, {})
-            # 보통 가장 최근 종가에 해당 (상황에 따라 필드가 없을 수 있음)
-            v = q.get("regularMarketPreviousClose")
-            if v is not None:
-                close = float(v)
-                trading_day = "last_trading_day"
-                close_src = "yahoo_quote(prev_close)"
+            # 폴백: regularMarketPreviousClose(전일종가), regularMarketPrice(현재/마감 근접)
+            pc = q.get("regularMarketPreviousClose")
+            rp = q.get("regularMarketPrice")
+            if pc is not None and rp is not None:
+                prev_close = float(pc)
+                close = float(rp)
 
-        # 2) extended last
+        # 2) 애프터마켓 가격 가져오기 (yfinance 우선, 실패 시 quote)
         ext_px = None
-        ext_ts_et = None
-        ext_src = None
         try:
-            ext_ts_et, ext_px = get_extended_last_yfinance(sym)
-            ext_src = "yfinance(1m_prepost)"
+            _, ext_px = get_extended_last_yfinance(sym)  # (ts_et, px)
         except Exception:
             q = quote_map.get(sym, {})
-            # after-hours 우선
             v = q.get("postMarketPrice")
             if v is None:
-                v = q.get("regularMarketPrice")
-            if v is not None:
+                # after-hours가 없을 때는 프리마켓/정규로 대체하지 않는 게 깔끔함
+                ext_px = None
+            else:
                 ext_px = float(v)
-                ext_src = "yahoo_quote(post/regular)"
-                # 시간도 있으면 표기
-                tsec = q.get("postMarketTime") or q.get("regularMarketTime")
-                if tsec:
-                    ext_ts_et = datetime.fromtimestamp(int(tsec), tz=ET)
 
-        if close is None and ext_px is None:
-            lines.append(f"{sym}: (no data)")
+        # 3) 출력 구성
+        if close is None or prev_close is None or prev_close == 0:
+            # 최소한 after-hours만이라도 있으면 표시
+            if ext_px is not None and close is not None and close != 0:
+                after_pct = (ext_px / close - 1.0) * 100.0
+                lines.append(f"{name} 마감 (N/A), 애프터 {after_pct:+.1f}%")
+            else:
+                lines.append(f"{name} (데이터 부족)")
             continue
 
-        if close is not None and ext_px is not None:
-            chg_pct = (ext_px / close - 1.0) * 100.0 if close != 0 else 0.0
-            ts_txt = f" @ {ext_ts_et.strftime('%Y-%m-%d %H:%M ET')}" if ext_ts_et else ""
-            day_txt = trading_day if trading_day else ""
-            lines.append(
-                f"{sym}: close {close:.2f} ({day_txt}) | ext {ext_px:.2f} ({chg_pct:+.2f}%)"
-                f"{ts_txt}"
-            )
-        elif close is not None:
-            lines.append(f"{sym}: close {close:.2f} ({trading_day})")
-        else:
-            ts_txt = f" @ {ext_ts_et.strftime('%Y-%m-%d %H:%M ET')}" if ext_ts_et else ""
-            lines.append(f"{sym}: ext {ext_px:.2f}{ts_txt}")
+        close_pct = (close / prev_close - 1.0) * 100.0
 
-        # 디버그성 출처(원하면 지워도 됨)
-        # lines.append(f"   src: close={close_src}, ext={ext_src}")
+        if ext_px is not None and close != 0:
+            after_pct = (ext_px / close - 1.0) * 100.0
+            lines.append(f"{name} {close_pct:+.1f}% 마감, 애프터 {after_pct:+.1f}%")
+        else:
+            lines.append(f"{name} {close_pct:+.1f}% 마감")
 
     return "\n".join(lines)
+
 
 
 # ---------------------------
@@ -343,8 +404,7 @@ def main():
         if chat_id is None:
             print("[INFO] chat_id is null. Send /start to the bot once.")
         else:
-            tickers = state.get("tickers", [])
-            msg = build_report(tickers)
+            msg = build_report(state)            
             try:
                 tg_send(chat_id, msg)
                 # 3) 발송 후 last_sent_kst_date 저장
