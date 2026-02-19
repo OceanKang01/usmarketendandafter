@@ -245,8 +245,12 @@ def handle_updates(state: dict) -> bool:
             tg_send(chat_id, "OK. 다음 실행에서 리포트를 즉시 생성해 보낼게요.")
             continue
 
-
-    
+         if cmd == "/reset":
+            state["last_sent_kst_date"] = None
+            state["force_report"] = False
+            changed = True
+            tg_send(chat_id, "OK. last_sent_kst_date를 초기화했어요. /test로 다시 발송 테스트할 수 있어요.")
+            continue   
     
     return changed
 
