@@ -399,7 +399,8 @@ def main():
     today_kst = now_kst.date().isoformat()
 
     # 2) 06:30~06:45 사이 && 오늘 미발송이면 발송
-    if in_send_window_kst(now_kst) and state.get("last_sent_kst_date") != today_kst:
+    force_send = os.environ.get("FORCE_SEND", "0") == "1"
+    if (force_send or in_send_window_kst(now_kst)) and state.get("last_sent_kst_date") != today_kst:    
         chat_id = state.get("chat_id")
         if chat_id is None:
             print("[INFO] chat_id is null. Send /start to the bot once.")
