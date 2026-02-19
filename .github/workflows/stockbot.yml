@@ -34,6 +34,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
           TELEGRAM_FORCE_CHAT_ID: ${{ secrets.TELEGRAM_FORCE_CHAT_ID }}
+          FORCE_SEND: "1"
         run: |
           python stockbot.py
 
